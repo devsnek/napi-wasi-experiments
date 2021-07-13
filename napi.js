@@ -1,5 +1,6 @@
 'use strict';
 
+const vm = require('vm');
 const util = require('util');
 
 const NAPI_AUTO_LENGTH = -1;
@@ -76,6 +77,7 @@ class NAPI {
 
   externalData = new WeakMap();
   wrapData = new WeakMap();
+  typeTags = new WeakMap();
   finalizationRegistry = new FinalizationRegistry((items) => {
     for (const [cbIdx, envPtr, data, hint] of items) {
       try {
@@ -509,7 +511,44 @@ class NAPI {
       this.writeValue(resultPtr, this.store(proto));
       return NAPI_OK;
     }),
-    get_date_value: this.wrap((envPtr, valueIdx, resultPtr) => {
+    napi_get_typedarray_info: this.wrap((envPtr, typedarrayIdx, typePtr, lengthPtr,
+                                         dataPtr, arraybufferPtr, byteOffsetPtr) => {
+      const typedArray = this.load(typedarrayIdx);
+      if (!util.types.isTypedArray(typedArray)) {
+        return NAPI_ARRAYBUFFER_EXPECTED;
+      }
+      this.view.setUint32(typePtr, {
+        Int8Array: 0,
+        Uint8Array: 1,
+        Uint8ClampedArray: 2,
+        Int16Array: 3,
+        Uint16Array: 4,
+        Int32Array: 5,
+        Uint32Array: 6,
+        Float32Array: 7,
+        Float64Array: 8,
+        BigInt64Array: 9,
+        BigUint64Array: 10,
+      }[typedArray[Symbol.toStringTag]]);
+      this.view.setUint32(lengthPtr, typedArray.length);
+      this.view.setUint32(dataPtr, 0);
+      this.writeValue(arraybufferPtr, this.store(typedArray.buffer));
+      this.view.setUint32(byteOffsetPtr, typedArray.byteOffset);
+      return NAPI_OK;
+    }),
+    napi_get_dataview_info: this.wrap((envPtr, dataviewIdx, byteLengthPtr,
+                                       dataPtr, arraybufferPtr, byteOffsetPtr) => {
+      const dataView = this.load(dataviewIdx);
+      if (!util.types.isDataView(dataView)) {
+        return NAPI_INVALID_ARG;
+      }
+      this.view.setUint32(byteLengthPtr, dataView.byteLength);
+      this.view.setUint32(dataPtr, 0);
+      this.writeValue(arraybufferPtr, dataView.buffer);
+      this.view.setUint32(byteOffsetPtr, dataView.byteOffset);
+      return NAPI_OK;
+    }),
+    napi_get_date_value: this.wrap((envPtr, valueIdx, resultPtr) => {
       const d = this.load(valueIdx);
       if (!util.types.isDate(d)) {
         return NAPI_DATE_EXPECTED;
@@ -517,7 +556,7 @@ class NAPI {
       this.view.setFloat64(resultPtr, d.getTime(), true);
       return NAPI_OK;
     }),
-    get_value_bool: this.wrap((envPtr, valueIdx, resultPtr) => {
+    napi_get_value_bool: this.wrap((envPtr, valueIdx, resultPtr) => {
       const b = this.load(valueIdx);
       if (typeof b !== 'boolean') {
         return NAPI_BOOLEAN_EXPECTED;
@@ -955,6 +994,14 @@ class NAPI {
         });
       return NAPI_OK;
     }),
+    napi_object_freeze: this.wrap((envPtr, objectIdx) => {
+      Object.freeze(this.load(objectIdx));
+      return NAPI_OK;
+    }),
+    napi_object_seal: this.wrap((envPtr, objectIdx) => {
+      Object.seal(this.load(objectIdx));
+      return NAPI_OK;
+    }),
     napi_call_function: (envPtr, recvIdx, funcIdx, argc, argvPtr, resultPtr) => {
       if (this.exception !== kNoException) {
         return NAPI_PENDING_EXCEPTION;
@@ -1096,6 +1143,41 @@ class NAPI {
       this.view.setUint32(resultPtr, nativeObjectPtr);
       return NAPI_OK;
     }),
+    napi_type_tag_object: this.wrap((envPtr, jsObjectIdx, typeTagPtr) => {
+      const jsObject = this.load(jsObjectIdx);
+      if (!util.types.isObject(jsObject)) {
+        return NAPI_OBJECT_EXPECTED;
+      }
+      if (this.typeTags.has(jsObject)) {
+        return NAPI_INVALID_ARG;
+      }
+      const typeTag = {
+        upper: this.view.getBigUint64(typeTagPtr),
+        lower: this.view.getBigUint64(typeTagPtr + 8),
+      };
+      this.typeTags.set(jsObject, typeTag);
+      return NAPI_OK;
+    }),
+    napi_check_object_type_tag: this.wrap((envPtr, jsObjectIdx, typeTagPtr, resultPtr) => {
+      const jsObject = this.load(jsObjectIdx);
+      if (!util.types.isObject(jsObject)) {
+        return NAPI_OBJECT_EXPECTED;
+      }
+      const typeTag = {
+        upper: this.view.getBigUint64(typeTagPtr),
+        lower: this.view.getBigUint64(typeTagPtr + 8),
+      };
+      const thisTag = this.typeTags.get(jsObject);
+      if (thisTag) {
+        this.view.setUint32(
+          resultPtr,
+          typeTag.upper === thisTag.upper && typeTag.lower === thisTag.lower,
+        );
+      } else {
+        this.view.setUint32(resultPtr, 0);
+      }
+      return NAPI_OK;
+    }),
     napi_add_finalizer: this.wrap((envPtr, jsObjectIdx, nativeObjectPtr,
                                    finalizeCb, finalizeHint, resultPtr) => {
       const jsObject = this.load(jsObjectIdx);
@@ -1106,6 +1188,40 @@ class NAPI {
         this.references.push(ref);
         this.writeValue(resultPtr, this.references.length - 1);
       }
+      return NAPI_OK;
+    }),
+
+    napi_create_promise: this.wrap((envPtr, deferredPtr, promisePtr) => {
+      let resolve;
+      let reject;
+      const promise = new Promise((r, j) => {
+        resolve = r;
+        reject = j;
+      });
+      const deferred = { resolve, reject };
+      this.writeValue(deferredPtr, this.store(deferred));
+      this.writeValue(promisePtr, this.store(promise));
+      return NAPI_OK;
+    }),
+    napi_resolve_deferred: this.wrap((envPtr, deferredIdx, resolutionIdx) => {
+      const deferred = this.load(deferredIdx);
+      const resolution = this.load(resolutionIdx);
+      deferred.resolve(resolution);
+      return NAPI_OK;
+    }),
+    napi_reject_deferred: this.wrap((envPtr, deferredIdx, rejectionIdx) => {
+      const deferred = this.load(deferredIdx);
+      const rejection = this.load(rejectionIdx);
+      deferred.resolve(rejection);
+      return NAPI_OK;
+    }),
+    napi_is_promise: this.wrap((envPtr, valueIdx, resultPtr) => {
+      this.view.setUint8(resultPtr, util.types.isPromise(this.load(valueIdx)));
+    }),
+    napi_run_script: this.wrap((envPtr, scriptIdx, resultPtr) => {
+      const script = this.load(scriptIdx);
+      const result = vm.runInThisContext(script);
+      this.writeValue(resultPtr, this.store(result));
       return NAPI_OK;
     }),
   };
