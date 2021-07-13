@@ -6,6 +6,7 @@ if [ ${1: -3} == ".rs" ]
 then
   rustc $1 \
     -O \
+    --crate-type=cdylib \
     --target wasm32-wasi \
     -C link-arg=--export-table \
     -o build/wasi_test.wasm

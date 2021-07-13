@@ -1,7 +1,3 @@
-// #![no_main]
-
-fn main() {}
-
 #[allow(non_camel_case_types)]
 #[allow(dead_code)]
 mod napi_sys {
@@ -242,14 +238,10 @@ mod napi {
     pub fn create_string_utf8(env: Env, string: &str) -> Result<Value, Error> {
         let mut value = MaybeUninit::uninit();
         let len = string.bytes().len();
+        let cstr = CString::new(string).unwrap();
         NAPI!(
             env,
-            napi_create_string_utf8(
-                env.env,
-                CString::new(string).unwrap().as_ptr(),
-                len,
-                value.as_mut_ptr(),
-            ),
+            napi_create_string_utf8(env.env, cstr.as_ptr(), len, value.as_mut_ptr()),
             value.assume_init()
         )
     }
@@ -307,11 +299,12 @@ mod napi {
 
     pub fn create_function(env: Env, name: &str, cb: Callback) -> Result<Value, Error> {
         let mut value = MaybeUninit::uninit();
+        let cstr = CString::new(name).unwrap();
         NAPI!(
             env,
             napi_create_function(
                 env.env,
-                CString::new(name).unwrap().as_ptr(),
+                cstr.as_ptr(),
                 name.len(),
                 Some(callback_dispatch),
                 cb as *mut std::ffi::c_void,
@@ -322,9 +315,10 @@ mod napi {
     }
 
     pub fn set_named_property(env: Env, obj: Value, name: &str, value: Value) -> Result<(), Error> {
+        let cstr = CString::new(name).unwrap();
         NAPI!(
             env,
-            napi_set_named_property(env.env, obj, CString::new(name).unwrap().as_ptr(), value),
+            napi_set_named_property(env.env, obj, cstr.as_ptr(), value),
             ()
         )
     }
@@ -334,7 +328,10 @@ mod napi {
         ($init:ident) => {
             use napi_sys::*;
             #[no_mangle]
-            extern "C" fn napi_register_module_v1(env: napi_env, exports: napi_value) -> napi_value {
+            extern "C" fn napi_register_module_v1(
+                env: napi_env,
+                exports: napi_value,
+            ) -> napi_value {
                 $init(Env::from(env), exports);
                 exports
             }
